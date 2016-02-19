@@ -1888,7 +1888,10 @@ public class DTCli
 
           if (ap != null) {
             try {
-              checkCompatible(ap, cp);
+              if (!commandLineInfo.force) {
+                checkPlatformCompatible(ap);
+                checkConfigPackageCompatible(ap, cp);
+              }
               launchAppPackage(ap, cp, commandLineInfo, reader);
               return;
             } finally {
@@ -2821,7 +2824,7 @@ public class DTCli
               }
               LogicalPlan logicalPlan = appFactory.createApp(submitApp.getLogicalPlanConfiguration());
               map.put("applicationName", appFactory.getName());
-              map.put("logicalPlan", LogicalPlanSerializer.convertToMap(logicalPlan));
+              map.put("logicalPlan", LogicalPlanSerializer.convertToMap(logicalPlan, false));
             } finally {
               if (raw) {
                 System.setOut(originalStream);
@@ -2837,7 +2840,7 @@ public class DTCli
             LogicalPlan logicalPlan = appFactory.createApp(submitApp.getLogicalPlanConfiguration());
             Map<String, Object> map = new HashMap<String, Object>();
             map.put("applicationName", appFactory.getName());
-            map.put("logicalPlan", LogicalPlanSerializer.convertToMap(logicalPlan));
+            map.put("logicalPlan", LogicalPlanSerializer.convertToMap(logicalPlan, false));
             printJson(map);
           } else if (filename.endsWith(".properties")) {
             File file = new File(filename);
@@ -2846,7 +2849,7 @@ public class DTCli
             LogicalPlan logicalPlan = appFactory.createApp(submitApp.getLogicalPlanConfiguration());
             Map<String, Object> map = new HashMap<String, Object>();
             map.put("applicationName", appFactory.getName());
-            map.put("logicalPlan", LogicalPlanSerializer.convertToMap(logicalPlan));
+            map.put("logicalPlan", LogicalPlanSerializer.convertToMap(logicalPlan, false));
             printJson(map);
           } else {
             StramAppLauncher submitApp = getStramAppLauncher(filename, config, commandLineInfo.ignorePom);
@@ -2890,7 +2893,7 @@ public class DTCli
               Map<String, Object> map = new HashMap<String, Object>();
               map.put("applicationName", appInfo.name);
               if (appInfo.dag != null) {
-                map.put("logicalPlan", LogicalPlanSerializer.convertToMap(appInfo.dag));
+                map.put("logicalPlan", LogicalPlanSerializer.convertToMap(appInfo.dag, false));
               }
               if (appInfo.error != null) {
                 map.put("error", appInfo.error);
@@ -3426,14 +3429,19 @@ public class DTCli
 
   }
 
-  private void checkCompatible(AppPackage ap, ConfigPackage cp)
+  private void checkConfigPackageCompatible(AppPackage ap, ConfigPackage cp)
   {
     if (cp == null) {
       return;
     }
     String requiredAppPackageName = cp.getAppPackageName();
+    String requiredAppPackageGroupId = cp.getAppPackageGroupId();
     if (requiredAppPackageName != null && !requiredAppPackageName.equals(ap.getAppPackageName())) {
       throw new CliException("Config package requires an app package name of \"" + requiredAppPackageName + "\". The app package given has the name of \"" + ap.getAppPackageName() + "\"");
+    }
+    if (requiredAppPackageGroupId != null && !requiredAppPackageGroupId.equals(ap.getAppPackageGroupId())) {
+      throw new CliException("Config package requires an app package group id of \"" + requiredAppPackageGroupId +
+          "\". The app package given has the groupId of \"" + ap.getAppPackageGroupId() + "\"");
     }
     String requiredAppPackageMinVersion = cp.getAppPackageMinVersion();
     if (requiredAppPackageMinVersion != null && VersionInfo.compare(requiredAppPackageMinVersion, ap.getAppPackageVersion()) > 0) {
@@ -3442,6 +3450,14 @@ public class DTCli
     String requiredAppPackageMaxVersion = cp.getAppPackageMaxVersion();
     if (requiredAppPackageMaxVersion != null && VersionInfo.compare(requiredAppPackageMaxVersion, ap.getAppPackageVersion()) < 0) {
       throw new CliException("Config package requires an app package maximum version of \"" + requiredAppPackageMaxVersion + "\". The app package given is of version \"" + ap.getAppPackageVersion() + "\"");
+    }
+  }
+
+  private void checkPlatformCompatible(AppPackage ap)
+  {
+    String apVersion = ap.getDtEngineVersion();
+    if (!VersionInfo.isCompatible(VersionInfo.getVersion(), apVersion)) {
+      throw new CliException("This App Package is compiled with Apache Apex Core API version " + apVersion + ", which is incompatible with this Apex Core version " + VersionInfo.getVersion());
     }
   }
 
@@ -3848,6 +3864,7 @@ public class DTCli
     final Option originalAppID = add(OptionBuilder.withArgName("application id").hasArg().withDescription("Specify original application identifier for restart.").create("originalAppId"));
     final Option exactMatch = add(new Option("exactMatch", "Only consider applications with exact app name"));
     final Option queue = add(OptionBuilder.withArgName("queue name").hasArg().withDescription("Specify the queue to launch the application").create("queue"));
+    final Option force = add(new Option("force", "Force launch the application. Do not check for compatibility"));
 
     private Option add(Option opt)
     {
@@ -3888,6 +3905,7 @@ public class DTCli
     result.args = line.getArgs();
     result.origAppId = line.getOptionValue(LAUNCH_OPTIONS.originalAppID.getOpt());
     result.exactMatch = line.hasOption("exactMatch");
+    result.force = line.hasOption("force");
     return result;
   }
 
@@ -3904,6 +3922,7 @@ public class DTCli
     String archives;
     String origAppId;
     boolean exactMatch;
+    boolean force;
     String[] args;
   }
 

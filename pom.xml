@@ -30,11 +30,12 @@
 
   <groupId>org.apache.apex</groupId>
   <artifactId>apex</artifactId>
-  <version>3.2.0-incubating</version>
+  <version>3.4.0-incubating-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <name>Apache Apex (incubating)</name>
   <url>http://apex.incubator.apache.org</url>
+  <inceptionYear>2015</inceptionYear>
 
   <organization>
     <name>Apache Software Foundation</name>
@@ -48,17 +49,9 @@
     </license>
   </licenses>
 
-  <repositories>
-    <!-- added for semantic versioning check, won't be needed once we publish to central -->
-    <repository>
-      <snapshots>
-        <enabled>false</enabled>
-      </snapshots>
-      <id>datatorrent</id>
-      <name>DataTorrent Release Repository</name>
-      <url>https://www.datatorrent.com/maven/content/repositories/releases/</url>
-    </repository>
-  </repositories>
+  <prerequisites>
+    <maven>3.0.5</maven>
+  </prerequisites>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -70,9 +63,11 @@
     <jersey.version>1.9</jersey.version>
     <!-- do not change jetty version as later versions have problems with DefaultServlet -->
     <jetty.version>8.1.10.v20130312</jetty.version>
-    <maven.deploy.repo.classifier/>
     <license.skip>true</license.skip>
-    <checkstyle.console>false</checkstyle.console>
+    <findbugs.xmlOutput>true</findbugs.xmlOutput>
+    <findbugs.failOnError>false</findbugs.failOnError>
+    <findbugs.skip>false</findbugs.skip>
+    <postNoticeText>The initial developer of the original code is&#xA;DataTorrent, Inc. (http://www.datatorrent.com)&#xA;Copyright (c) 2012 - 2015. All Rights Reserved.</postNoticeText>
   </properties>
 
   <dependencies>
@@ -106,6 +101,7 @@
             <email>dev@apex.incubator.apache.org</email>
           </properties>
           <excludes>
+            <exclude>**/*.iml</exclude>
             <exclude>DISCLAIMER</exclude>
             <exclude>LICENSE</exclude>
             <exclude>NOTICE</exclude>
@@ -114,6 +110,7 @@
             <exclude>**/*.txt</exclude>
             <exclude>**/*.importorder</exclude>
             <exclude>**/archetype-resources/**</exclude>
+            <exclude>misc/ide-templates/**</exclude>
           </excludes>
           <mapping>
             <dtcli>SCRIPT_STYLE</dtcli>
@@ -192,9 +189,29 @@
             <exclude>**/*.md</exclude>
             <exclude>**/*.txt</exclude>
             <exclude>**/*.importorder</exclude>
+            <exclude>misc/ide-templates/**</exclude>
             <exclude>**/NOTICE.vm</exclude>
           </excludes>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>findbugs-maven-plugin</artifactId>
+        <version>3.0.3</version>
+        <configuration>
+          <includeTests>true</includeTests>
+          <xmlOutput>${findbugs.xmlOutput}</xmlOutput>
+          <failOnError>${findbugs.failOnError}</failOnError>
+          <skip>${findbugs.skip}</skip>
+        </configuration>
+        <executions>
+          <execution>
+            <phase></phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
     <pluginManagement>
@@ -306,35 +323,56 @@
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-checkstyle-plugin</artifactId>
-          <version>2.16</version>
+          <version>2.17</version>
           <dependencies>
             <dependency>
               <groupId>com.puppycrawl.tools</groupId>
               <artifactId>checkstyle</artifactId>
-              <version>6.9</version>
+              <version>6.15</version>
             </dependency>
           </dependencies>
           <executions>
             <execution>
               <id>checkstyle</id>
-              <phase>validate</phase>
               <goals>
                 <goal>check</goal>
               </goals>
-              <configuration>
-                <failOnViolation>true</failOnViolation>
-                <logViolationsToConsole>${checkstyle.console}</logViolationsToConsole>
-              </configuration>
             </execution>
           </executions>
           <configuration>
             <configLocation>apex_checks.xml</configLocation>
+            <suppressionsLocation>checkstyle-suppressions.xml</suppressionsLocation>
+            <includeTestSourceDirectory>true</includeTestSourceDirectory>
           </configuration>
         </plugin>
         <plugin>
           <groupId>org.apache.rat</groupId>
           <artifactId>apache-rat-plugin</artifactId>
           <version>0.11</version>
+        </plugin>
+        <plugin>
+          <groupId>com.github.siom79.japicmp</groupId>
+          <artifactId>japicmp-maven-plugin</artifactId>
+          <version>0.6.2</version>
+          <configuration>
+            <parameter>
+              <onlyModified>true</onlyModified>
+              <accessModifier>protected</accessModifier>
+              <breakBuildOnModifications>false</breakBuildOnModifications>
+              <breakBuildOnBinaryIncompatibleModifications>true</breakBuildOnBinaryIncompatibleModifications>
+              <onlyBinaryIncompatible>false</onlyBinaryIncompatible>
+              <includeSynthetic>false</includeSynthetic>
+              <ignoreMissingClasses>false</ignoreMissingClasses>
+            </parameter>
+          </configuration>
+          <executions>
+            <execution>
+              <phase>verify</phase>
+              <goals>
+                <goal>cmp</goal>
+              </goals>
+            </execution>
+          </executions>
         </plugin>
       </plugins>
     </pluginManagement>

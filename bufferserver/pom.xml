@@ -25,7 +25,7 @@
   <parent>
     <groupId>org.apache.apex</groupId>
     <artifactId>apex</artifactId>
-    <version>3.2.0-incubating</version>
+    <version>3.4.0-incubating-SNAPSHOT</version>
   </parent>
 
   <artifactId>apex-bufferserver</artifactId>
@@ -50,9 +50,6 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-checkstyle-plugin</artifactId>
-        <configuration>
-          <maxAllowedViolations>60</maxAllowedViolations>
-        </configuration>
       </plugin>
     </plugins>
   </build>

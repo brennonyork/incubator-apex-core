@@ -27,6 +27,7 @@ import java.net.SocketAddress;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -80,6 +81,7 @@ public class StramLocalCluster implements Runnable, Controller
   private boolean appDone = false;
   private final Map<String, StreamingContainer> injectShutdown = new ConcurrentHashMap<String, StreamingContainer>();
   private boolean heartbeatMonitoringEnabled = true;
+  private Callable<Boolean> exitCondition;
 
   public interface MockComponentFactory
   {
@@ -427,6 +429,11 @@ public class StramLocalCluster implements Runnable, Controller
     this.perContainerBufferServer = perContainerBufferServer;
   }
 
+  public void setExitCondition(Callable<Boolean> exitCondition)
+  {
+    this.exitCondition = exitCondition;
+  }
+
   @Override
   public void run()
   {
@@ -476,6 +483,14 @@ public class StramLocalCluster implements Runnable, Controller
         appDone = true;
       }
 
+      try {
+        if (exitCondition != null && exitCondition.call()) {
+          appDone = true;
+        }
+      } catch (Exception ex) {
+        break;
+      }
+
       if (Thread.interrupted()) {
         break;
       }
@@ -495,6 +510,8 @@ public class StramLocalCluster implements Runnable, Controller
       injectShutdown.put(lsc.getContainerId(), lsc);
       lsc.triggerHeartbeat();
     }
+
+    dnmgr.teardown();
 
     LOG.info("Application finished.");
     if (!perContainerBufferServer) {

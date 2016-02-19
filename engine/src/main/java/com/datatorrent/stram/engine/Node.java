@@ -28,25 +28,44 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
-import java.util.concurrent.*;
+import java.util.Queue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.LinkedBlockingQueue;
 
-import org.apache.hadoop.util.ReflectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import org.apache.hadoop.util.ReflectionUtils;
 
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.math.IntMath;
 
-import com.datatorrent.api.*;
+import com.datatorrent.api.AutoMetric;
+import com.datatorrent.api.Component;
+import com.datatorrent.api.InputOperator;
+import com.datatorrent.api.Operator;
 import com.datatorrent.api.Operator.InputPort;
 import com.datatorrent.api.Operator.OutputPort;
 import com.datatorrent.api.Operator.ProcessingMode;
 import com.datatorrent.api.Operator.Unifier;
+import com.datatorrent.api.Sink;
+import com.datatorrent.api.Stats;
+import com.datatorrent.api.StatsListener;
 import com.datatorrent.api.StatsListener.OperatorRequest;
-
+import com.datatorrent.api.StorageAgent;
 import com.datatorrent.bufferserver.util.Codec;
 import com.datatorrent.common.util.AsyncFSStorageAgent;
 import com.datatorrent.common.util.Pair;
@@ -105,15 +124,17 @@ public abstract class Node<OPERATOR extends Operator> implements Component<Opera
   private final List<Field> metricFields;
   private final Map<String, Method> metricMethods;
   private ExecutorService executorService;
-  private Queue<Pair<FutureTask<Stats.CheckpointStats>, Long>> taskQueue;
+  private Queue<Pair<FutureTask<Stats.CheckpointStats>, CheckpointWindowInfo>> taskQueue;
   protected Stats.CheckpointStats checkpointStats;
+  public long firstWindowMillis;
+  public long windowWidthMillis;
 
   public Node(OPERATOR operator, OperatorContext context)
   {
     this.operator = operator;
     this.context = context;
     executorService = Executors.newSingleThreadExecutor();
-    taskQueue = new LinkedList<Pair<FutureTask<Stats.CheckpointStats>, Long>>();
+    taskQueue = new LinkedList<Pair<FutureTask<Stats.CheckpointStats>, CheckpointWindowInfo>>();
 
     outputs = new HashMap<String, Sink<Object>>();
 
@@ -297,6 +318,10 @@ public abstract class Node<OPERATOR extends Operator> implements Component<Opera
       logger.warn("Shutdown requested when context is not available!");
     }
     else {
+      /*
+       * Since alive is non-volatile this code explicitly unsets it in the operator lifecycle theread thereby notifying
+       * it even when the thread is reading it from the cache
+       */
       context.request(new OperatorRequest()
       {
         @Override
@@ -331,7 +356,9 @@ public abstract class Node<OPERATOR extends Operator> implements Component<Opera
 
   protected void emitEndWindow()
   {
-    EndWindowTuple ewt = new EndWindowTuple(currentWindowId);
+    long windowId = (operator instanceof Operator.DelayOperator) ?
+        WindowGenerator.getAheadWindowId(currentWindowId, firstWindowMillis, windowWidthMillis, 1) : currentWindowId;
+    EndWindowTuple ewt = new EndWindowTuple(windowId);
     for (int s = sinks.length; s-- > 0; ) {
       sinks[s].put(ewt);
     }
@@ -418,14 +445,16 @@ public abstract class Node<OPERATOR extends Operator> implements Component<Opera
       checkpoint = null;
     }
     else {
-      Pair<FutureTask<Stats.CheckpointStats>, Long> pair = taskQueue.peek();
+      Pair<FutureTask<Stats.CheckpointStats>, CheckpointWindowInfo> pair = taskQueue.peek();
       if (pair != null && pair.getFirst().isDone()) {
         taskQueue.poll();
         try {
+          CheckpointWindowInfo checkpointWindowInfo = pair.getSecond();
           stats.checkpointStats = pair.getFirst().get();
-          stats.checkpoint = new Checkpoint(pair.getSecond(), applicationWindowCount, checkpointWindowCount);
+          stats.checkpoint = new Checkpoint(checkpointWindowInfo.windowId, checkpointWindowInfo.applicationWindowCount,
+              checkpointWindowInfo.checkpointWindowCount);
           if (operator instanceof Operator.CheckpointListener) {
-            ((Operator.CheckpointListener) operator).checkpointed(pair.getSecond());
+            ((Operator.CheckpointListener) operator).checkpointed(checkpointWindowInfo.windowId);
           }
         } catch (Exception ex) {
           throw DTThrowable.wrapIfChecked(ex);
@@ -461,6 +490,10 @@ public abstract class Node<OPERATOR extends Operator> implements Component<Opera
   void checkpoint(long windowId)
   {
     if (!context.stateless) {
+      if (operator instanceof Operator.CheckpointNotificationListener) {
+        ((Operator.CheckpointNotificationListener)operator).beforeCheckpoint(windowId);
+      }
+
       StorageAgent ba = context.getValue(OperatorContext.STORAGE_AGENT);
       if (ba != null) {
         try {
@@ -471,13 +504,17 @@ public abstract class Node<OPERATOR extends Operator> implements Component<Opera
             AsyncFSStorageAgent asyncFSStorageAgent = (AsyncFSStorageAgent) ba;
             if (!asyncFSStorageAgent.isSyncCheckpoint()) {
               if(PROCESSING_MODE != ProcessingMode.EXACTLY_ONCE) {
+                CheckpointWindowInfo checkpointWindowInfo = new CheckpointWindowInfo();
+                checkpointWindowInfo.windowId = windowId;
+                checkpointWindowInfo.applicationWindowCount = applicationWindowCount;
+                checkpointWindowInfo.checkpointWindowCount = checkpointWindowCount;
                 CheckpointHandler checkpointHandler = new CheckpointHandler();
                 checkpointHandler.agent = asyncFSStorageAgent;
                 checkpointHandler.operatorId = id;
                 checkpointHandler.windowId = windowId;
                 checkpointHandler.stats = checkpointStats;
-                FutureTask<Stats.CheckpointStats> futureTask = new FutureTask<Stats.CheckpointStats>(checkpointHandler);
-                taskQueue.add(new Pair<FutureTask<Stats.CheckpointStats>, Long>(futureTask, windowId));
+                FutureTask<Stats.CheckpointStats> futureTask = new FutureTask<>(checkpointHandler);
+                taskQueue.add(new Pair<FutureTask<Stats.CheckpointStats>, CheckpointWindowInfo>(futureTask, checkpointWindowInfo));
                 executorService.submit(futureTask);
                 checkpoint = null;
                 checkpointStats = null;
@@ -632,6 +669,13 @@ public abstract class Node<OPERATOR extends Operator> implements Component<Opera
       stats.checkpointTime = System.currentTimeMillis() - stats.checkpointStartTime;
       return stats;
     }
+  }
+
+  private class CheckpointWindowInfo
+  {
+    public int applicationWindowCount;
+    public int checkpointWindowCount;
+    public long windowId;
   }
 
   private static final Logger logger = LoggerFactory.getLogger(Node.class);

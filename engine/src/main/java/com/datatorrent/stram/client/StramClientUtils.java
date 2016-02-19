@@ -25,18 +25,23 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.mozilla.javascript.Scriptable;
+import javax.script.ScriptEngine;
+import javax.script.ScriptEngineManager;
+import javax.script.ScriptException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang3.StringEscapeUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -645,57 +650,73 @@ public class StramClientUtils
 
   public static void evalProperties(Properties target, Configuration vars)
   {
-    Pattern substitionPattern = Pattern.compile("\\$\\{(.+?)\\}");
+    ScriptEngine engine = new ScriptEngineManager().getEngineByName("javascript");
+
+    Pattern substitutionPattern = Pattern.compile("\\$\\{(.+?)\\}");
     Pattern evalPattern = Pattern.compile("\\{% (.+?) %\\}");
 
-    org.mozilla.javascript.Context context = org.mozilla.javascript.Context.enter();
-    context.setOptimizationLevel(-1);
-    Scriptable scope = context.initStandardObjects();
     try {
-      context.evaluateString(scope, "var _prop = {}", "EvalLaunchProperties", 0, null);
+      engine.eval("var _prop = {}");
       for (Map.Entry<String, String> entry : vars) {
-        LOG.info("Evaluating: {}", "_prop[\"" + entry.getKey() + "\"] = " + entry.getValue());
-        context.evaluateString(scope, "_prop[\"" + StringEscapeUtils.escapeJava(entry.getKey())  + "\"] = \"" + StringEscapeUtils.escapeJava(entry.getValue()) + "\"", "EvalLaunchProperties", 0, null);
+        String evalString = String.format("_prop[\"%s\"] = \"%s\"", StringEscapeUtils.escapeJava(entry.getKey()), StringEscapeUtils.escapeJava(entry.getValue()));
+        engine.eval(evalString);
+      }
+    } catch (ScriptException ex) {
+      LOG.warn("Javascript error: {}", ex.getMessage());
+    }
+
+    for (Map.Entry<Object, Object> entry : target.entrySet()) {
+      String value = entry.getValue().toString();
+
+      Matcher matcher = substitutionPattern.matcher(value);
+      if (matcher.find()) {
+        StringBuilder newValue = new StringBuilder();
+        int cursor = 0;
+        do {
+          newValue.append(value.substring(cursor, matcher.start()));
+          String subst = vars.get(matcher.group(1));
+          if (subst != null) {
+            newValue.append(subst);
+          }
+          cursor = matcher.end();
+        } while (matcher.find());
+        newValue.append(value.substring(cursor));
+        target.put(entry.getKey(), newValue.toString());
       }
 
-      for (Map.Entry<Object, Object> entry : target.entrySet()) {
-        String value = entry.getValue().toString();
+      matcher = evalPattern.matcher(value);
+      if (matcher.find()) {
+        StringBuilder newValue = new StringBuilder();
+        int cursor = 0;
+        do {
+          newValue.append(value.substring(cursor, matcher.start()));
+          try {
+            Object result = engine.eval(matcher.group(1));
+            String eval = result.toString();
 
-        Matcher matcher = substitionPattern.matcher(value);
-        if (matcher.find()) {
-          StringBuilder newValue = new StringBuilder();
-          int cursor = 0;
-          do {
-            newValue.append(value.substring(cursor, matcher.start()));
-            String subst = vars.get(matcher.group(1));
-            if (subst != null) {
-              newValue.append(subst);
-            }
-            cursor = matcher.end();
-          } while (matcher.find());
-          newValue.append(value.substring(cursor));
-          target.put(entry.getKey(), newValue.toString());
-        }
-
-        matcher = evalPattern.matcher(value);
-        if (matcher.find()) {
-          StringBuilder newValue = new StringBuilder();
-          int cursor = 0;
-          do {
-            newValue.append(value.substring(cursor, matcher.start()));
-            String eval = context.evaluateString(scope, matcher.group(1), "EvalLaunchProperties", 0, null).toString();
             if (eval != null) {
               newValue.append(eval);
             }
-            cursor = matcher.end();
-          } while (matcher.find());
-          newValue.append(value.substring(cursor));
-          target.put(entry.getKey(), newValue.toString());
-        }
+          } catch (ScriptException ex) {
+            LOG.warn("JavaScript exception {}", ex.getMessage());
+          }
+          cursor = matcher.end();
+        } while (matcher.find());
+        newValue.append(value.substring(cursor));
+        target.put(entry.getKey(), newValue.toString());
       }
     }
-    finally {
-      org.mozilla.javascript.Context.exit();
+  }
+
+  public static void evalConfiguration(Configuration conf)
+  {
+    Properties props = new Properties();
+    for (Map.Entry entry : conf) {
+      props.put(entry.getKey(), entry.getValue());
+    }
+    evalProperties(props, conf);
+    for (Map.Entry<Object, Object> entry : props.entrySet()) {
+      conf.set((String)entry.getKey(), (String)entry.getValue());
     }
   }
 
@@ -730,6 +751,66 @@ public class StramClientUtils
       }
     }
     return null;
+  }
+
+  public static InetSocketAddress getRMWebAddress(Configuration conf, String rmId)
+  {
+    boolean sslEnabled = conf.getBoolean(CommonConfigurationKeysPublic.HADOOP_SSL_ENABLED_KEY, CommonConfigurationKeysPublic.HADOOP_SSL_ENABLED_DEFAULT);
+    return getRMWebAddress(conf, sslEnabled, rmId);
+  }
+
+  public static InetSocketAddress getRMWebAddress(Configuration conf, boolean sslEnabled, String rmId)
+  {
+    rmId = (rmId == null) ? "" : ("." + rmId);
+    InetSocketAddress address;
+    if (sslEnabled) {
+      address = conf.getSocketAddr(YarnConfiguration.RM_WEBAPP_HTTPS_ADDRESS + rmId, YarnConfiguration.DEFAULT_RM_WEBAPP_HTTPS_ADDRESS, YarnConfiguration.DEFAULT_RM_WEBAPP_HTTPS_PORT);
+    } else {
+      address = conf.getSocketAddr(YarnConfiguration.RM_WEBAPP_ADDRESS + rmId, YarnConfiguration.DEFAULT_RM_WEBAPP_ADDRESS, YarnConfiguration.DEFAULT_RM_WEBAPP_PORT);
+    }
+    LOG.info("rm webapp address setting {}", address);
+    LOG.debug("rm setting sources {}", conf.getPropertySources(YarnConfiguration.RM_WEBAPP_ADDRESS));
+    InetSocketAddress resolvedSocketAddress = NetUtils.getConnectAddress(address);
+    InetAddress resolved = resolvedSocketAddress.getAddress();
+    if (resolved == null || resolved.isAnyLocalAddress() || resolved.isLoopbackAddress()) {
+      try {
+        resolvedSocketAddress = InetSocketAddress.createUnresolved(InetAddress.getLocalHost().getCanonicalHostName(), address.getPort());
+      } catch (UnknownHostException e) {
+        //Ignore and fallback.
+      }
+    }
+    return resolvedSocketAddress;
+  }
+
+  public static String getSocketConnectString(InetSocketAddress socketAddress)
+  {
+    String host;
+    InetAddress address = socketAddress.getAddress();
+    if (address == null) {
+      host = socketAddress.getHostString();
+    } else if (address.isAnyLocalAddress() || address.isLoopbackAddress()) {
+      host = address.getCanonicalHostName();
+    } else {
+      host = address.getHostName();
+    }
+    return host + ":" + socketAddress.getPort();
+  }
+
+  public static List<InetSocketAddress> getRMAddresses(Configuration conf)
+  {
+
+    List<InetSocketAddress> rmAddresses = new ArrayList<>();
+    if (ConfigUtils.isRMHAEnabled(conf)) {
+      // HA is enabled get all
+      for (String rmId : ConfigUtils.getRMHAIds(conf)) {
+        InetSocketAddress socketAddress = getRMWebAddress(conf, rmId);
+        rmAddresses.add(socketAddress);
+      }
+    } else {
+      InetSocketAddress socketAddress = getRMWebAddress(conf, null);
+      rmAddresses.add(socketAddress);
+    }
+    return rmAddresses;
   }
 
 }
